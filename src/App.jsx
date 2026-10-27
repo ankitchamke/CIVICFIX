@@ -16,15 +16,23 @@ import {
 } from './data/mockData';
 import {
   loadStoredComplaints,
-  saveComplaintsToStorage,
-  resetDemoData,
   loadUpvotedIds,
   recordUpvoteId,
 } from './utils/storage';
+import {
+  getComplaints,
+  addComplaint,
+  updateComplaintStatus as repoUpdateStatus,
+  incrementComplaintUpvotes as repoIncrementUpvotes,
+  resetComplaints,
+} from './services/complaintsRepository';
+import { useAppAuth } from './lib/useAppAuth';
 import { PlusCircle, MapPin, Map, FileText, CheckCircle, Info } from 'lucide-react';
 import { Button } from './components/ui/Button';
 
 export default function App() {
+  const auth = useAppAuth();
+
   // Persistent Complaint State
   const [complaints, setComplaints] = useState(() => loadStoredComplaints());
   const [upvotedIds, setUpvotedIds] = useState(() => loadUpvotedIds());
@@ -41,11 +49,6 @@ export default function App() {
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [selectedComplaint, setSelectedComplaint] = useState(null);
 
-  // Sync complaints to localStorage on change
-  useEffect(() => {
-    saveComplaintsToStorage(complaints);
-  }, [complaints]);
-
   // Show auto-dismissing toast
   const showToast = (message, type = 'success') => {
     setToastMessage({ message, type });
@@ -54,8 +57,24 @@ export default function App() {
     }, 4000);
   };
 
+  // Initial load from Supabase with graceful localStorage fallback
+  useEffect(() => {
+    let isMounted = true;
+    getComplaints().then((res) => {
+      if (isMounted && res.complaints && res.complaints.length > 0) {
+        setComplaints(res.complaints);
+        if (res.source === 'supabase') {
+          showToast('Connected to Supabase live database', 'info');
+        }
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   // Upvote handler with session/identity duplicate protection
-  const handleUpvote = (complaintId) => {
+  const handleUpvote = async (complaintId) => {
     if (upvotedIds.includes(complaintId)) {
       showToast('You have already upvoted this complaint in this session.', 'info');
       return;
@@ -65,10 +84,12 @@ export default function App() {
     const updatedVotes = recordUpvoteId(complaintId);
     setUpvotedIds(updatedVotes);
 
+    let nextCount = 1;
     setComplaints((prev) =>
       prev.map((item) => {
         if (item.id === complaintId) {
-          return { ...item, upvotes: (item.upvotes || 0) + 1 };
+          nextCount = (item.upvotes || 0) + 1;
+          return { ...item, upvotes: nextCount };
         }
         return item;
       })
@@ -83,16 +104,22 @@ export default function App() {
     });
 
     showToast('Endorsement recorded! Municipal priority incremented.');
+
+    // Sync to repository (localStorage + Supabase)
+    await repoIncrementUpvotes(complaintId, nextCount);
   };
 
   // Submit new complaint from modal
-  const handleAddComplaint = (newComplaint) => {
+  const handleAddComplaint = async (newComplaint, authorName) => {
     // Record creator's automatic vote
     const updatedVotes = recordUpvoteId(newComplaint.id);
     setUpvotedIds(updatedVotes);
 
-    setComplaints((prev) => [newComplaint, ...prev]);
+    setComplaints((prev) => [newComplaint, ...prev.filter((c) => c.id !== newComplaint.id)]);
     showToast(`Complaint registered in Nagpur registry: ${newComplaint.id}`);
+
+    // Persist via repository
+    await addComplaint(newComplaint, authorName || auth.displayName || DEMO_USER.name);
   };
 
   // Upvote from duplicate check
@@ -101,7 +128,7 @@ export default function App() {
   };
 
   // Demo Status Change Control
-  const handleUpdateStatus = (complaintId, newStatus) => {
+  const handleUpdateStatus = async (complaintId, newStatus) => {
     const statusLabels = {
       open: 'Open',
       in_progress: 'In Progress',
@@ -116,10 +143,11 @@ export default function App() {
       minute: '2-digit',
     });
 
+    const actor = auth.displayName || DEMO_USER.name;
     const timelineEntry = {
       date: timeStr,
       action: `Status Updated to ${statusLabels[newStatus] || newStatus}`,
-      note: `Updated in Demo Mode by ${DEMO_USER.name} (Verified Resident).`,
+      note: `Updated by ${actor} (Verified Resident).`,
     };
 
     setComplaints((prev) =>
@@ -149,11 +177,14 @@ export default function App() {
     });
 
     showToast(`Complaint #${complaintId} status changed to ${statusLabels[newStatus] || newStatus}`);
+
+    // Sync to repository
+    await repoUpdateStatus(complaintId, newStatus, timelineEntry);
   };
 
   // Reset to clean demo data
   const handleResetDemoData = () => {
-    const freshData = resetDemoData();
+    const freshData = resetComplaints();
     setComplaints(freshData);
     setUpvotedIds([]);
     setSelectedComplaint(null);
@@ -164,7 +195,6 @@ export default function App() {
   };
 
   // Filter for "My Complaints"
-  // Displays user complaints (first 3 demo complaints or user-created complaints)
   const myComplaints = complaints.filter(
     (c, idx) => idx < 3 || (c.id && c.id.startsWith('CV-2026-9'))
   );
@@ -226,7 +256,7 @@ export default function App() {
                 />
 
                 {/* Map Quick Shortcut Banner */}
-                <div className="bg-linear-to-r from-slate-900 via-slate-800 to-teal-950 rounded-2xl p-4 sm:p-5 border border-slate-700/70 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-white">
+                <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 rounded-2xl p-4 sm:p-5 border border-slate-700/70 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-white">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-xl bg-teal-500/20 border border-teal-500/40 flex items-center justify-center text-teal-400 shrink-0">
                       <Map className="w-5 h-5" />

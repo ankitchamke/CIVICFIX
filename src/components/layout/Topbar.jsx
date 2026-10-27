@@ -4,12 +4,9 @@ import {
   Bell,
   Menu,
   Clock,
-  Sparkles,
-  ChevronDown,
-  UserCheck,
-  RotateCcw,
 } from 'lucide-react';
-import { DEMO_USER } from '../../data/mockData';
+import { AuthProfileMenu } from './AuthProfileMenu';
+import { isSupabaseConfigured } from '../../lib/supabase';
 
 export function Topbar({
   onToggleMobile,
@@ -20,20 +17,15 @@ export function Topbar({
   onResetDemoData,
 }) {
   const [showNotifications, setShowNotifications] = useState(false);
-  const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [notifs, setNotifs] = useState(notifications);
 
   const notifRef = useRef(null);
-  const profileRef = useRef(null);
 
-  // Close dropdowns when clicking outside
+  // Close notifications dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(event) {
       if (notifRef.current && !notifRef.current.contains(event.target)) {
         setShowNotifications(false);
-      }
-      if (profileRef.current && !profileRef.current.contains(event.target)) {
-        setShowProfileMenu(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -45,6 +37,8 @@ export function Topbar({
   const markAllAsRead = () => {
     setNotifs((prev) => prev.map((n) => ({ ...n, unread: false })));
   };
+
+  const hasDb = isSupabaseConfigured();
 
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-6 py-3.5 transition-shadow">
@@ -71,10 +65,29 @@ export function Topbar({
           </div>
         </div>
 
-        {/* Right: Search, Notifications, Demo User Profile */}
+        {/* Right: Search, Database Telemetry, Notifications, User Profile */}
         <div className="flex items-center gap-3 shrink-0">
+          {/* Database Persistence Status Indicator */}
+          {hasDb ? (
+            <div
+              className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80 text-[11px] font-semibold"
+              title="Supabase PostgreSQL database configured"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Supabase Sync</span>
+            </div>
+          ) : (
+            <div
+              className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-[11px] font-semibold"
+              title="Operating with local browser storage cache"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+              <span>Local Storage Mesh</span>
+            </div>
+          )}
+
           {/* Search Bar */}
-          <div className="relative hidden lg:block w-72">
+          <div className="relative hidden xl:block w-64">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
@@ -174,94 +187,11 @@ export function Topbar({
             )}
           </div>
 
-          {/* User Profile / Demo Badge Dropdown */}
-          <div className="relative" ref={profileRef}>
-            <button
-              onClick={() => setShowProfileMenu(!showProfileMenu)}
-              className="flex items-center gap-2.5 p-1 sm:pl-2 sm:pr-3 sm:py-1 rounded-full border border-slate-200 hover:border-slate-300 bg-slate-50 hover:bg-slate-100/80 transition-all cursor-pointer"
-            >
-              <img
-                src={DEMO_USER.avatar}
-                alt={DEMO_USER.name}
-                className="w-7 h-7 rounded-full object-cover ring-1 ring-teal-500/30"
-              />
-              <div className="text-left hidden sm:block">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-semibold text-slate-900 leading-tight">
-                    {DEMO_USER.name}
-                  </span>
-                  <span className="text-[9px] uppercase font-bold tracking-wider bg-amber-100 text-amber-800 px-1 py-0.2 rounded border border-amber-300">
-                    Demo
-                  </span>
-                </div>
-                <p className="text-[10px] text-slate-500 leading-tight">
-                  Verified Resident
-                </p>
-              </div>
-              <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden sm:block" />
-            </button>
-
-            {showProfileMenu && (
-              <div className="absolute right-0 mt-2 w-72 rounded-xl bg-white border border-slate-200 shadow-xl py-3 z-50 animate-in fade-in zoom-in-95">
-                <div className="px-4 pb-3 border-b border-slate-100">
-                  <div className="flex items-center gap-2.5">
-                    <img
-                      src={DEMO_USER.avatar}
-                      alt={DEMO_USER.name}
-                      className="w-10 h-10 rounded-full object-cover"
-                    />
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">
-                        {DEMO_USER.name}
-                      </p>
-                      <p className="text-xs text-slate-500">ankit.chamke@nagpur.civic.test</p>
-                      <span className="inline-block mt-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                        ✓ Nagpur Resident Verified
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-3 text-xs bg-slate-50/80 m-3 rounded-lg border border-slate-200/70 text-slate-600">
-                  <div className="flex items-center gap-1.5 font-semibold text-slate-800 mb-1">
-                    <UserCheck className="w-3.5 h-3.5 text-teal-600" />
-                    <span>Demo Profile Mode</span>
-                  </div>
-                  <p className="text-[11px] leading-relaxed">
-                    Clerk auth credentials are not set in the environment. Operating in verified resident demo mode with local storage persistence.
-                  </p>
-                </div>
-
-                <div className="px-2 pt-1 space-y-1">
-                  <button
-                    onClick={() => {
-                      setShowProfileMenu(false);
-                      onOpenReportModal();
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-md transition-colors flex items-center justify-between cursor-pointer"
-                  >
-                    <span>File a test complaint</span>
-                    <Sparkles className="w-3.5 h-3.5 text-teal-600" />
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setShowProfileMenu(false);
-                      if (onResetDemoData) {
-                        if (window.confirm('Reset all complaints back to the original demo data?')) {
-                          onResetDemoData();
-                        }
-                      }
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 rounded-md transition-colors flex items-center justify-between cursor-pointer"
-                  >
-                    <span>Reset Local Demo Data</span>
-                    <RotateCcw className="w-3.5 h-3.5 text-rose-500" />
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          {/* User Profile / Auth Menu */}
+          <AuthProfileMenu
+            onOpenReportModal={onOpenReportModal}
+            onResetDemoData={onResetDemoData}
+          />
         </div>
       </div>
     </header>

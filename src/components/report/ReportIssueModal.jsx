@@ -16,6 +16,7 @@ import { StatusBadge } from '../ui/Badge';
 import { CATEGORIES, NAGPUR_ZONES, SUGGESTED_NAGPUR_LOCATIONS } from '../../data/mockData';
 import { compressImage } from '../../utils/storage';
 import { findPossibleDuplicates } from '../../utils/duplicateCheck';
+import { useAppAuth } from '../../lib/useAppAuth';
 
 export function ReportIssueModal({
   isOpen,
@@ -24,6 +25,7 @@ export function ReportIssueModal({
   onUpvoteExisting,
   existingComplaints = [],
 }) {
+  const { displayName } = useAppAuth();
   const [step, setStep] = useState(1); // 1: form, 2: similarity-check, 3: success
   const [category, setCategory] = useState('roads');
   const [title, setTitle] = useState('');
@@ -211,12 +213,13 @@ export function ReportIssueModal({
             minute: '2-digit',
           }),
           action: 'Grievance Registered',
-          note: 'Submitted by Ankit Chamke via CivicFix Nagpur portal. Assigned schematic map node.',
+          note: `Submitted by ${displayName || 'Ankit Chamke'} via CivicFix Nagpur portal. Assigned schematic map node.`,
         },
       ],
+      createdBy: displayName || 'Ankit Chamke',
     };
 
-    onSubmitComplaint(newRecord);
+    onSubmitComplaint(newRecord, displayName || 'Ankit Chamke');
     setCreatedTicketId(newId);
     setStep(3);
   };

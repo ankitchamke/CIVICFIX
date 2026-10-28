@@ -9,6 +9,8 @@ import {
   AlertCircle,
   ShieldCheck,
   Compass,
+  LogIn,
+  Loader2,
 } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
@@ -17,6 +19,9 @@ import { CATEGORIES, NAGPUR_ZONES, SUGGESTED_NAGPUR_LOCATIONS } from '../../data
 import { compressImage } from '../../utils/storage';
 import { findPossibleDuplicates } from '../../utils/duplicateCheck';
 import { useAppAuth } from '../../lib/useAppAuth';
+import { LocationPickerMap } from '../map/LocationPickerMap';
+import { SignInButton } from '@clerk/clerk-react';
+import { isClerkConfigured } from '../../lib/clerkConfig';
 
 export function ReportIssueModal({
   isOpen,
@@ -25,18 +30,21 @@ export function ReportIssueModal({
   onUpvoteExisting,
   existingComplaints = [],
 }) {
-  const { displayName } = useAppAuth();
+  const auth = useAppAuth();
   const [step, setStep] = useState(1); // 1: form, 2: similarity-check, 3: success
   const [category, setCategory] = useState('roads');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
   const [ward, setWard] = useState('zone-dharampeth');
-  const [schematicCoords, setSchematicCoords] = useState({ x: 440, y: 250 });
-  const [isDetectingLocation, setIsDetectingLocation] = useState(false);
+  const [latitude, setLatitude] = useState(null);
+  const [longitude, setLongitude] = useState(null);
+  const [isVerifiedLocation, setIsVerifiedLocation] = useState(false);
   const [photoPreview, setPhotoPreview] = useState(null);
   const [createdTicketId, setCreatedTicketId] = useState('');
   const [isCompressingPhoto, setIsCompressingPhoto] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
 
   // Inline Validation Errors
   const [errors, setErrors] = useState({});
@@ -89,8 +97,10 @@ export function ReportIssueModal({
 
   const handleSelectSuggestedLocation = (sug) => {
     setLocation(`${sug.label}, Nagpur`);
-    setSchematicCoords({ x: sug.x, y: sug.y });
-    // Match ward
+    setLatitude(sug.lat);
+    setLongitude(sug.lng);
+    setIsVerifiedLocation(true);
+
     if (sug.zone.includes('Dharampeth')) setWard('zone-dharampeth');
     else if (sug.zone.includes('Sitabuldi')) setWard('zone-dhantoli');
     else if (sug.zone.includes('Sadar') || sug.zone.includes('Civil')) setWard('zone-mangalwari');
@@ -102,45 +112,65 @@ export function ReportIssueModal({
     setErrors((prev) => ({ ...prev, location: null }));
   };
 
+  const handleMapPinSelected = (lat, lng) => {
+    if (lat == null || lng == null) {
+      setLatitude(null);
+      setLongitude(null);
+      setIsVerifiedLocation(false);
+      return;
+    }
+
+    setLatitude(lat);
+    setLongitude(lng);
+    setIsVerifiedLocation(true);
+
+    if (!location.trim()) {
+      setLocation(`Pinned Spot (${lat.toFixed(4)}°N, ${lng.toFixed(4)}°E), Nagpur`);
+    }
+
+    setTouched((prev) => ({ ...prev, location: true }));
+    setErrors((prev) => ({ ...prev, location: null }));
+  };
+
   const handleSimulateNagpurPin = () => {
-    setIsDetectingLocation(true);
-    setTimeout(() => {
-      setLocation('Munje Square, Sitabuldi Metro Interchange, Nagpur');
-      setWard('zone-dhantoli');
-      setSchematicCoords({ x: 440, y: 250 });
-      setIsDetectingLocation(false);
-      setTouched((prev) => ({ ...prev, location: true }));
-      setErrors((prev) => ({ ...prev, location: null }));
-    }, 400);
+    const sitabuldi = SUGGESTED_NAGPUR_LOCATIONS[0];
+    handleSelectSuggestedLocation(sitabuldi);
   };
 
   const handleFileChange = async (e) => {
     const file = e.target.files?.[0];
-    if (file) {
-      try {
-        setIsCompressingPhoto(true);
-        // Size-limit / compress image to prevent filling localStorage
-        const compressedDataUrl = await compressImage(file, 600, 600, 0.7);
-        setPhotoPreview(compressedDataUrl);
-      } catch (err) {
-        console.error('Failed to compress image:', err);
-      } finally {
-        setIsCompressingPhoto(false);
-      }
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file (PNG, JPG, WebP).');
+      return;
+    }
+
+    setIsCompressingPhoto(true);
+    try {
+      const compressedDataUrl = await compressImage(file, 900, 0.7);
+      setPhotoPreview(compressedDataUrl);
+    } catch (err) {
+      console.error('Image compression error:', err);
+      alert('Could not process this image. Please choose another.');
+    } finally {
+      setIsCompressingPhoto(false);
     }
   };
 
   const handleProceedToSimilarityCheck = (e) => {
     e.preventDefault();
-    setTouched({ title: true, category: true, location: true, description: true });
-    const errs = validate();
-    setErrors(errs);
+    const currentErrors = validate();
+    setErrors(currentErrors);
+    setTouched({
+      title: true,
+      category: true,
+      description: true,
+      location: true,
+    });
 
-    if (Object.keys(errs).length > 0) {
-      return;
-    }
+    if (Object.keys(currentErrors).length > 0) return;
 
-    // Run transparent local duplicate heuristic
     const matches = findPossibleDuplicates(
       { title, category, location, description },
       existingComplaints
@@ -150,38 +180,20 @@ export function ReportIssueModal({
       setDuplicateMatches(matches);
       setStep(2);
     } else {
-      // No duplicates found, proceed directly to final submit
       executeSubmission();
     }
   };
 
-  const executeSubmission = () => {
+  const executeSubmission = async () => {
+    setIsSubmitting(true);
+    setSubmitError(null);
+
     const randomDigits = Math.floor(1000 + Math.random() * 9000);
     const newId = `CV-2026-${randomDigits}`;
     const categoryObj = CATEGORIES.find((c) => c.id === category);
     const wardObj = NAGPUR_ZONES.find((z) => z.id === ward);
 
-    // Resolve schematic coordinates if not explicitly set
-    let finalX = schematicCoords.x;
-    let finalY = schematicCoords.y;
-
-    const locLower = location.toLowerCase();
-    if (locLower.includes('futala')) { finalX = 180; finalY = 155; }
-    else if (locLower.includes('dharampeth') || locLower.includes('gokulpeth')) { finalX = 275; finalY = 220; }
-    else if (locLower.includes('ambazari') || locLower.includes('vnit')) { finalX = 230; finalY = 320; }
-    else if (locLower.includes('civil lines')) { finalX = 360; finalY = 170; }
-    else if (locLower.includes('sadar')) { finalX = 435; finalY = 130; }
-    else if (locLower.includes('variety')) { finalX = 410; finalY = 275; }
-    else if (locLower.includes('wardha') || locLower.includes('chhatrapati')) { finalX = 420; finalY = 395; }
-    else if (locLower.includes('manish')) { finalX = 480; finalY = 460; }
-    else if (locLower.includes('pratap') || locLower.includes('subhash')) { finalX = 280; finalY = 410; }
-    else if (locLower.includes('medical')) { finalX = 550; finalY = 310; }
-    else if (locLower.includes('hingna')) { finalX = 280; finalY = 410; }
-    else {
-      // Slight jitter around Central Nagpur so new items don't overlap exactly
-      finalX = 430 + Math.floor((Math.random() - 0.5) * 40);
-      finalY = 240 + Math.floor((Math.random() - 0.5) * 40);
-    }
+    const actor = auth.displayName || 'Ankit Chamke';
 
     const newRecord = {
       id: newId,
@@ -190,8 +202,11 @@ export function ReportIssueModal({
       categoryLabel: categoryObj?.label || 'Other',
       location: location.trim(),
       ward: wardObj?.name || 'Dharampeth Zone (Zone 2), Nagpur',
-      schematicX: finalX,
-      schematicY: finalY,
+      latitude: typeof latitude === 'number' ? latitude : null,
+      longitude: typeof longitude === 'number' ? longitude : null,
+      isVerifiedLocation: Boolean(isVerifiedLocation && latitude && longitude),
+      schematicX: 440,
+      schematicY: 250,
       dateReported: new Date().toISOString(),
       status: 'open',
       priority: 'high',
@@ -213,15 +228,29 @@ export function ReportIssueModal({
             minute: '2-digit',
           }),
           action: 'Grievance Registered',
-          note: `Submitted by ${displayName || 'Ankit Chamke'} via CivicFix Nagpur portal. Assigned schematic map node.`,
+          note: `Submitted by ${actor} via CivicFix Nagpur portal.`,
         },
       ],
-      createdBy: displayName || 'Ankit Chamke',
+      reporterId: auth.isSignedIn && auth.user ? auth.user.id : 'demo_user',
+      reporterName: actor,
+      reporterEmail: auth.displayEmail || null,
+      isDemo: auth.isDemo,
+      createdBy: actor,
     };
 
-    onSubmitComplaint(newRecord, displayName || 'Ankit Chamke');
-    setCreatedTicketId(newId);
-    setStep(3);
+    try {
+      await onSubmitComplaint(newRecord, actor);
+      setCreatedTicketId(newId);
+      setStep(3); // ONLY reached upon verified successful save!
+    } catch (err) {
+      console.error('Submission failed:', err);
+      // Honest error state: Preserve user form data!
+      setSubmitError(
+        err.message || 'Database rejected the submission. Please check your network and try again.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const resetForm = () => {
@@ -230,11 +259,16 @@ export function ReportIssueModal({
     setDescription('');
     setLocation('');
     setCategory('roads');
+    setLatitude(null);
+    setLongitude(null);
+    setIsVerifiedLocation(false);
     setPhotoPreview(null);
     setCreatedTicketId('');
     setErrors({});
     setTouched({});
     setDuplicateMatches([]);
+    setSubmitError(null);
+    setIsSubmitting(false);
     onClose();
   };
 
@@ -244,20 +278,62 @@ export function ReportIssueModal({
       onClose={resetForm}
       title={
         step === 3
-          ? 'Grievance Registered in Nagpur Registry'
+          ? 'Grievance Registered in Shared Database'
           : step === 2
           ? 'Local Similarity Check — Possible Matches'
           : 'Report a Public Civic Issue in Nagpur'
       }
       subtitle={
         step === 3
-          ? 'Municipal tracking reference issued & pinned to the Nagpur Issue Map'
+          ? 'Municipal tracking reference issued & pinned to the shared Nagpur Civic Map'
           : step === 2
-          ? 'Review similar local reports before submitting to avoid duplicate work orders'
+          ? 'Review similar local reports before submitting to avoid duplicate work tickets'
           : 'Nagpur Municipal Corporation (NMC) jurisdiction · Nagpur, Maharashtra'
       }
       maxWidth="max-w-2xl"
     >
+      {/* Submission Error Banner - Preserves form inputs! */}
+      {submitError && (
+        <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 flex items-start gap-2 animate-in fade-in">
+          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-bold">Database Write Error (Your form entries are preserved):</p>
+            <p className="text-[11px] mt-0.5 text-rose-800">{submitError}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Reporter Identity Callout */}
+      {step === 1 && (
+        <div className="mb-4 p-2.5 rounded-xl border flex items-center justify-between gap-3 text-xs bg-slate-50 border-slate-200">
+          <div className="flex items-center gap-2">
+            <img
+              src={auth.displayAvatar}
+              alt={auth.displayName}
+              className="w-6 h-6 rounded-full object-cover ring-1 ring-slate-300"
+            />
+            <div>
+              <span className="font-bold text-slate-800">{auth.displayName}</span>
+              <span className="text-[10px] text-slate-500 ml-1.5">
+                {auth.isSignedIn ? '(Verified Resident)' : '(Demo Profile)'}
+              </span>
+            </div>
+          </div>
+
+          {!auth.isSignedIn && isClerkConfigured() && (
+            <SignInButton mode="modal">
+              <button
+                type="button"
+                className="text-[11px] text-teal-700 hover:text-teal-800 font-semibold flex items-center gap-1 cursor-pointer"
+              >
+                <LogIn className="w-3 h-3" />
+                <span>Sign in for real identity</span>
+              </button>
+            </SignInButton>
+          )}
+        </div>
+      )}
+
       {/* STEP 1: Main Grievance Form */}
       {step === 1 && (
         <form onSubmit={handleProceedToSimilarityCheck} className="space-y-4">
@@ -369,17 +445,16 @@ export function ReportIssueModal({
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-teal-600" />
-                4. Nagpur Location & Zone *
+                4. Location & Geographic Pin *
               </label>
               <button
                 type="button"
                 onClick={handleSimulateNagpurPin}
-                disabled={isDetectingLocation}
                 className="text-[11px] font-semibold text-teal-700 hover:text-teal-800 flex items-center gap-1 cursor-pointer"
                 title="Select central Nagpur point"
               >
-                <Compass className={`w-3 h-3 ${isDetectingLocation ? 'animate-spin' : ''}`} />
-                <span>{isDetectingLocation ? 'Locating...' : 'Select Central Pin (Sitabuldi)'}</span>
+                <Compass className="w-3 h-3" />
+                <span>Default Sitabuldi Pin</span>
               </button>
             </div>
 
@@ -388,7 +463,7 @@ export function ReportIssueModal({
               <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold block mb-1">
                 Suggested Nagpur Landmarks:
               </span>
-              <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-1">
+              <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto pr-1">
                 {SUGGESTED_NAGPUR_LOCATIONS.map((sug, idx) => (
                   <button
                     key={idx}
@@ -409,14 +484,14 @@ export function ReportIssueModal({
               </p>
             )}
 
-            {/* Non-Nagpur warning callout without altering user input */}
+            {/* Non-Nagpur warning */}
             {isNonNagpurDetected && (
               <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                 <div>
                   <p className="font-semibold text-amber-950">Nagpur Demo Scope Notice:</p>
                   <p className="text-[11px] text-amber-800">
-                    CivicFix is currently scoped to Nagpur, Maharashtra, India. Your input will be preserved and mapped to the Nagpur municipal demonstration registry.
+                    CivicFix is scoped to Nagpur, Maharashtra. Your input will be preserved in the Nagpur database.
                   </p>
                 </div>
               </div>
@@ -455,26 +530,38 @@ export function ReportIssueModal({
                 </select>
               </div>
             </div>
+
+            {/* Interactive Leaflet Location Picker Map */}
+            <div className="mt-2">
+              <span className="text-[10px] text-slate-500 font-semibold block mb-1">
+                Optional: Pinpoint exact spot on real Nagpur map
+              </span>
+              <LocationPickerMap
+                latitude={latitude}
+                longitude={longitude}
+                onLocationSelect={handleMapPinSelected}
+              />
+            </div>
           </div>
 
-          {/* Optional Photo Attachment with Size Limitation & Removal */}
+          {/* Optional Photo Attachment */}
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5">
+            <label className="block text-xs font-bold text-slate-700 mb-1">
               5. Photo Evidence (Optional)
             </label>
 
             {photoPreview ? (
-              <div className="relative rounded-xl overflow-hidden border border-slate-200 max-h-44 flex items-center justify-center bg-slate-900 group">
+              <div className="relative rounded-xl overflow-hidden border border-slate-200 bg-slate-900 aspect-video max-h-48 flex items-center justify-center">
                 <img
                   src={photoPreview}
-                  alt="Issue Preview"
-                  className="w-full h-44 object-cover"
+                  alt="Issue preview"
+                  className="w-full h-full object-cover"
                 />
                 <button
                   type="button"
                   onClick={() => setPhotoPreview(null)}
-                  className="absolute top-2 right-2 p-1.5 rounded-full bg-slate-900/80 text-white hover:bg-rose-600 transition-colors cursor-pointer shadow-md"
-                  title="Remove selected image"
+                  className="absolute top-2 right-2 p-1.5 rounded-full bg-slate-900/80 hover:bg-rose-600 text-white transition-colors cursor-pointer"
+                  title="Remove image"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -525,18 +612,25 @@ export function ReportIssueModal({
               * Required fields
             </span>
             <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={resetForm}>
+              <Button variant="ghost" size="sm" onClick={resetForm} disabled={isSubmitting}>
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" size="md">
-                Review & Submit Issue →
+              <Button type="submit" variant="primary" size="md" disabled={isSubmitting}>
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
+                    <span>Saving to Supabase...</span>
+                  </>
+                ) : (
+                  <span>Review & Submit Issue →</span>
+                )}
               </Button>
             </div>
           </div>
         </form>
       )}
 
-      {/* STEP 2: Local Heuristic Duplicate Similarity Check */}
+      {/* STEP 2: Duplicate Similarity Check */}
       {step === 2 && (
         <div className="space-y-4">
           <div className="p-4 rounded-xl bg-amber-50 border border-amber-200">
@@ -544,14 +638,11 @@ export function ReportIssueModal({
               <Sparkles className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
               <div>
                 <h4 className="text-sm font-bold text-amber-950">
-                  Demo Similarity Check — {duplicateMatches.length} Possible Nagpur Match{duplicateMatches.length > 1 ? 'es' : ''} Found
+                  Similarity Check — {duplicateMatches.length} Possible Nagpur Match{duplicateMatches.length > 1 ? 'es' : ''} Found
                 </h4>
                 <p className="text-xs text-amber-800 mt-1">
-                  Our transparent local heuristic found existing issues matching your category and location terms in Nagpur. 
-                  If your issue is already reported, upvoting it increases municipal dispatch urgency without creating duplicate work tickets.
-                </p>
-                <p className="text-[10px] text-amber-700 mt-1 font-mono">
-                  Heuristic note: No external AI or map API is invoked; this is a client-side keyword and category match.
+                  Our system found existing issues matching your category and location terms in Nagpur.
+                  If your issue is already reported, upvoting it increases municipal urgency without duplicate tickets.
                 </p>
               </div>
             </div>
@@ -613,21 +704,29 @@ export function ReportIssueModal({
           </div>
 
           <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-600">
-            <strong>Is your issue distinct?</strong> If this is a separate occurrence or different street address, you can continue submitting your new report.
+            <strong>Is your issue distinct?</strong> You can proceed to submit as a new report.
           </div>
 
           {/* Step 2 Actions */}
           <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-            <Button variant="ghost" size="sm" onClick={() => setStep(1)}>
+            <Button variant="ghost" size="sm" onClick={() => setStep(1)} disabled={isSubmitting}>
               ← Back to Edit
             </Button>
             <Button
               variant="primary"
               size="md"
               onClick={executeSubmission}
+              disabled={isSubmitting}
               className="bg-teal-600 hover:bg-teal-700"
             >
-              Continue & Submit as New Complaint
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
+                  <span>Saving to Database...</span>
+                </>
+              ) : (
+                <span>Continue & Submit as New Complaint</span>
+              )}
             </Button>
           </div>
         </div>
@@ -645,7 +744,7 @@ export function ReportIssueModal({
               Grievance Successfully Registered
             </h4>
             <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-              Your grievance has been assigned a tracking reference, pinned to the Nagpur Issue Map, and saved to local storage.
+              Your grievance has been assigned an NMC tracking reference, pinned to the real Nagpur Civic Map, and recorded in the database.
             </p>
           </div>
 
@@ -660,12 +759,12 @@ export function ReportIssueModal({
 
           <div className="text-xs text-slate-500 max-w-sm mx-auto flex items-center justify-center gap-1.5">
             <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <span>Persisted across page refreshes · Plotted on Nagpur Issue Map</span>
+            <span>Shared across all citizen sessions · Visible on real Nagpur Map</span>
           </div>
 
           <div className="pt-4 flex justify-center">
             <Button variant="primary" size="md" onClick={resetForm}>
-              Done & Return to Dashboard
+              Done & View on Map
             </Button>
           </div>
         </div>

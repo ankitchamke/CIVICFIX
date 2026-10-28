@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  Home,
   LayoutDashboard,
   PlusCircle,
   FileText,
@@ -21,6 +22,12 @@ export function Sidebar({
 }) {
   const navItems = [
     {
+      id: 'home',
+      label: 'Public Home',
+      icon: Home,
+      badge: null,
+    },
+    {
       id: 'overview',
       label: 'Overview',
       icon: LayoutDashboard,
@@ -30,7 +37,7 @@ export function Sidebar({
       id: 'map',
       label: 'Nagpur Issue Map',
       icon: Map,
-      badge: 'Interactive',
+      badge: 'Leaflet GPS',
     },
     {
       id: 'report',
@@ -79,7 +86,10 @@ export function Sidebar({
         <div>
           {/* Brand Header */}
           <div className="h-16 px-5 flex items-center justify-between border-b border-slate-800">
-            <div className="flex items-center gap-2.5">
+            <div
+              className="flex items-center gap-2.5 cursor-pointer"
+              onClick={() => onSelectTab('home')}
+            >
               <div className="w-9 h-9 rounded-xl bg-teal-500/20 border border-teal-500/40 flex items-center justify-center text-teal-400 shadow-inner">
                 <ShieldCheck className="w-5 h-5 text-teal-400" />
               </div>

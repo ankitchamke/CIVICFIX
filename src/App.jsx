@@ -8,7 +8,8 @@ import { ComplaintsList } from './components/dashboard/ComplaintsList';
 import { NearbyDuplicatesPanel } from './components/dashboard/NearbyDuplicatesPanel';
 import { ComplaintDetailModal } from './components/complaints/ComplaintDetailModal';
 import { ReportIssueModal } from './components/report/ReportIssueModal';
-import { NagpurIssueMap } from './components/map/NagpurIssueMap';
+import { RealNagpurMap } from './components/map/RealNagpurMap';
+import { PublicHomepage } from './components/home/PublicHomepage';
 import { HelpSupportView } from './components/views/HelpSupportView';
 import {
   MOCK_NOTIFICATIONS,
@@ -25,6 +26,7 @@ import {
   updateComplaintStatus as repoUpdateStatus,
   incrementComplaintUpvotes as repoIncrementUpvotes,
   resetComplaints,
+  subscribeToComplaints,
 } from './services/complaintsRepository';
 import { useAppAuth } from './lib/useAppAuth';
 import { PlusCircle, MapPin, Map, FileText, CheckCircle, Info } from 'lucide-react';
@@ -37,8 +39,14 @@ export default function App() {
   const [complaints, setComplaints] = useState(() => loadStoredComplaints());
   const [upvotedIds, setUpvotedIds] = useState(() => loadUpvotedIds());
 
-  // UI State
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'map' | 'my-complaints' | 'nearby' | 'help'
+  // UI State: 'home' is the default public entry point
+  const [activeTab, setActiveTab] = useState(() => {
+    const hash = window.location.hash.replace('#', '');
+    return ['home', 'overview', 'map', 'my-complaints', 'nearby', 'help'].includes(hash)
+      ? hash
+      : 'home';
+  });
+
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -54,33 +62,67 @@ export default function App() {
     setToastMessage({ message, type });
     setTimeout(() => {
       setToastMessage(null);
-    }, 4000);
+    }, 4500);
   };
 
-  // Initial load from Supabase with graceful localStorage fallback
+  // Sync hash routing so browser back/forward and direct links work
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (['home', 'overview', 'map', 'my-complaints', 'nearby', 'help'].includes(hash)) {
+        setActiveTab(hash);
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  const handleSelectTab = (tab) => {
+    setActiveTab(tab);
+    window.location.hash = tab === 'home' ? '' : tab;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Shared Data synchronization: Initial load, Realtime stream, and fallback polling
   useEffect(() => {
     let isMounted = true;
-    getComplaints().then((res) => {
-      if (isMounted && res.complaints && res.complaints.length > 0) {
-        setComplaints(res.complaints);
-        if (res.source === 'supabase') {
-          showToast('Connected to Supabase live database', 'info');
+
+    const refreshData = () => {
+      getComplaints().then((res) => {
+        if (isMounted && res.complaints && res.complaints.length > 0) {
+          setComplaints(res.complaints);
         }
-      }
+      });
+    };
+
+    // Initial load
+    refreshData();
+
+    // Subscribe to live database changes across all user sessions
+    const unsubscribe = subscribeToComplaints((payload) => {
+      console.log('Realtime change from Supabase:', payload);
+      refreshData();
     });
+
+    // Multi-browser poll every 20 seconds to guarantee fresh shared data
+    const pollInterval = setInterval(() => {
+      refreshData();
+    }, 20000);
+
     return () => {
       isMounted = false;
+      unsubscribe();
+      clearInterval(pollInterval);
     };
   }, []);
 
-  // Upvote handler with session/identity duplicate protection
+  // Upvote handler with session protection and database sync
   const handleUpvote = async (complaintId) => {
     if (upvotedIds.includes(complaintId)) {
-      showToast('You have already upvoted this complaint in this session.', 'info');
+      showToast('You have already endorsed this complaint in this session.', 'info');
       return;
     }
 
-    // Record vote in persistent storage
     const updatedVotes = recordUpvoteId(complaintId);
     setUpvotedIds(updatedVotes);
 
@@ -95,7 +137,6 @@ export default function App() {
       })
     );
 
-    // Also update selectedComplaint if open
     setSelectedComplaint((prev) => {
       if (prev && prev.id === complaintId) {
         return { ...prev, upvotes: (prev.upvotes || 0) + 1 };
@@ -105,21 +146,24 @@ export default function App() {
 
     showToast('Endorsement recorded! Municipal priority incremented.');
 
-    // Sync to repository (localStorage + Supabase)
-    await repoIncrementUpvotes(complaintId, nextCount);
+    try {
+      await repoIncrementUpvotes(complaintId, nextCount);
+    } catch (err) {
+      console.warn('Failed to sync upvote to database:', err);
+    }
   };
 
   // Submit new complaint from modal
   const handleAddComplaint = async (newComplaint, authorName) => {
-    // Record creator's automatic vote
+    // 1. Attempt database write first (will throw if remote write fails!)
+    await addComplaint(newComplaint, authorName || auth.displayName || DEMO_USER.name);
+
+    // 2. On confirmed write: record creator's upvote and update local state
     const updatedVotes = recordUpvoteId(newComplaint.id);
     setUpvotedIds(updatedVotes);
 
     setComplaints((prev) => [newComplaint, ...prev.filter((c) => c.id !== newComplaint.id)]);
-    showToast(`Complaint registered in Nagpur registry: ${newComplaint.id}`);
-
-    // Persist via repository
-    await addComplaint(newComplaint, authorName || auth.displayName || DEMO_USER.name);
+    showToast(`Complaint registered in Nagpur database: ${newComplaint.id}`);
   };
 
   // Upvote from duplicate check
@@ -127,7 +171,7 @@ export default function App() {
     handleUpvote(existingId);
   };
 
-  // Demo Status Change Control
+  // Status Change Control
   const handleUpdateStatus = async (complaintId, newStatus) => {
     const statusLabels = {
       open: 'Open',
@@ -178,11 +222,10 @@ export default function App() {
 
     showToast(`Complaint #${complaintId} status changed to ${statusLabels[newStatus] || newStatus}`);
 
-    // Sync to repository
     await repoUpdateStatus(complaintId, newStatus, timelineEntry);
   };
 
-  // Reset to clean demo data
+  // Reset demo data
   const handleResetDemoData = () => {
     const freshData = resetComplaints();
     setComplaints(freshData);
@@ -191,15 +234,65 @@ export default function App() {
     setStatusFilter('all');
     setCategoryFilter('all');
     setSearchQuery('');
-    showToast('Nagpur demo data and local storage reset to initial baseline.');
+    showToast('Nagpur demo data reset to initial baseline.');
   };
 
-  // Filter for "My Complaints"
+  // Derived user reports
   const myComplaints = complaints.filter(
-    (c, idx) => idx < 3 || (c.id && c.id.startsWith('CV-2026-9'))
+    (c) =>
+      (auth.isSignedIn && auth.user && c.reporterId === auth.user.id) ||
+      (!auth.isSignedIn && (c.id?.startsWith('CV-2026-9') || c.reporterId === 'demo_user'))
   );
   const nearbyComplaints = complaints.filter((c) => c.isNearby);
 
+  // If on the Public Homepage at '/' or '#home', render the clean public homepage
+  if (activeTab === 'home') {
+    return (
+      <>
+        {/* Toast Notification */}
+        {toastMessage && (
+          <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl bg-slate-900 text-white shadow-xl border border-slate-700 animate-in fade-in slide-in-from-bottom-3 duration-200 text-xs">
+            {toastMessage.type === 'info' ? (
+              <Info className="w-4 h-4 text-teal-400 shrink-0" />
+            ) : (
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span className="font-medium">{toastMessage.message}</span>
+          </div>
+        )}
+
+        <PublicHomepage
+          complaints={complaints}
+          onNavigate={handleSelectTab}
+          onOpenReportModal={() => setIsReportModalOpen(true)}
+          onSelectComplaint={(complaint) => setSelectedComplaint(complaint)}
+          onUpvoteComplaint={handleUpvote}
+          upvotedIds={upvotedIds}
+          onResetDemoData={handleResetDemoData}
+        />
+
+        {/* Modals */}
+        <ReportIssueModal
+          isOpen={isReportModalOpen}
+          onClose={() => setIsReportModalOpen(false)}
+          onSubmitComplaint={handleAddComplaint}
+          onUpvoteExisting={handleUpvoteExisting}
+          existingComplaints={complaints}
+        />
+
+        <ComplaintDetailModal
+          complaint={selectedComplaint}
+          isOpen={Boolean(selectedComplaint)}
+          onClose={() => setSelectedComplaint(null)}
+          onUpvote={handleUpvote}
+          onUpdateStatus={handleUpdateStatus}
+          hasUpvoted={selectedComplaint ? upvotedIds.includes(selectedComplaint.id) : false}
+        />
+      </>
+    );
+  }
+
+  // Dashboard / App Navigation Layout (when navigating to Explore Map, Overview, My Reports, Help)
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 font-sans antialiased selection:bg-teal-500 selection:text-white relative">
       {/* Toast Notification */}
@@ -214,14 +307,14 @@ export default function App() {
         </div>
       )}
 
-      {/* Top Disclaimer Banner with Reset Action */}
+      {/* Top Disclaimer Banner */}
       <DisclaimerBanner onResetDemoData={handleResetDemoData} />
 
       <div className="flex-1 flex w-full">
         {/* Left Sidebar */}
         <Sidebar
           activeTab={activeTab}
-          onSelectTab={setActiveTab}
+          onSelectTab={handleSelectTab}
           onOpenReportModal={() => setIsReportModalOpen(true)}
           mobileOpen={mobileSidebarOpen}
           onCloseMobile={() => setMobileSidebarOpen(false)}
@@ -246,16 +339,15 @@ export default function App() {
 
           {/* Main Body */}
           <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto space-y-6">
-            {/* View: Overview */}
+            {/* View: Overview & Registry */}
             {activeTab === 'overview' && (
               <>
-                {/* Hero / Overview Banner */}
                 <CivicOverviewPanel
                   complaints={complaints}
                   onOpenReportModal={() => setIsReportModalOpen(true)}
                 />
 
-                {/* Map Quick Shortcut Banner */}
+                {/* Map Shortcut Banner */}
                 <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 rounded-2xl p-4 sm:p-5 border border-slate-700/70 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-white">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-xl bg-teal-500/20 border border-teal-500/40 flex items-center justify-center text-teal-400 shrink-0">
@@ -263,13 +355,13 @@ export default function App() {
                     </div>
                     <div>
                       <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                        Interactive Nagpur Civic Issue Map
+                        Geographic Nagpur Civic Map
                         <span className="text-[10px] bg-teal-500/20 text-teal-300 px-2 py-0.2 rounded-full border border-teal-500/30">
-                          {complaints.length} Local Grievances Plotted
+                          {complaints.filter((c) => c.latitude).length} GPS-Pinned
                         </span>
                       </h4>
                       <p className="text-xs text-slate-300 mt-0.5">
-                        Inspect spatial issue concentrations across Sitabuldi, Dharampeth, Sadar, Futala, and Wardha Road.
+                        Interactive OpenStreetMap view centered on Nagpur (Sitabuldi, Dharampeth, Sadar, Futala, Wardha Road).
                       </p>
                     </div>
                   </div>
@@ -278,21 +370,19 @@ export default function App() {
                     variant="primary"
                     size="sm"
                     icon={Map}
-                    onClick={() => setActiveTab('map')}
+                    onClick={() => handleSelectTab('map')}
                     className="shrink-0 bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold"
                   >
-                    Launch Nagpur Map
+                    Launch Full Map
                   </Button>
                 </div>
 
-                {/* Summary Metrics */}
                 <SummaryCards
                   complaints={complaints}
                   activeFilter={statusFilter}
                   onFilterChange={(newFilter) => setStatusFilter(newFilter)}
                 />
 
-                {/* Nearby Duplicates Alert & Detection Section */}
                 <NearbyDuplicatesPanel
                   complaints={complaints}
                   onSelectComplaint={(complaint) => setSelectedComplaint(complaint)}
@@ -301,7 +391,6 @@ export default function App() {
                   upvotedIds={upvotedIds}
                 />
 
-                {/* Grievance Registry / Complaints List */}
                 <ComplaintsList
                   complaints={complaints}
                   onSelectComplaint={(complaint) => setSelectedComplaint(complaint)}
@@ -317,15 +406,48 @@ export default function App() {
               </>
             )}
 
-            {/* View: Dedicated Nagpur Issue Map */}
+            {/* View: Dedicated Real Leaflet Nagpur Issue Map */}
             {activeTab === 'map' && (
-              <NagpurIssueMap
-                complaints={complaints}
-                onSelectComplaint={(complaint) => setSelectedComplaint(complaint)}
-                onUpvoteComplaint={handleUpvote}
-                upvotedIds={upvotedIds}
-                onOpenReportModal={() => setIsReportModalOpen(true)}
-              />
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200">
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                      <Map className="w-5 h-5 text-teal-600" />
+                      Nagpur Civic Issue Map
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Real geographic mapping powered by OpenStreetMap · Nagpur, Maharashtra, India
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleSelectTab('home')}
+                    >
+                      ← Back to Home
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={PlusCircle}
+                      onClick={() => setIsReportModalOpen(true)}
+                    >
+                      Report Issue Here
+                    </Button>
+                  </div>
+                </div>
+
+                <RealNagpurMap
+                  complaints={complaints}
+                  onSelectComplaint={(complaint) => setSelectedComplaint(complaint)}
+                  onUpvoteComplaint={handleUpvote}
+                  upvotedIds={upvotedIds}
+                  onOpenReportModal={() => setIsReportModalOpen(true)}
+                  isCompactPreview={false}
+                />
+              </div>
             )}
 
             {/* View: My Complaints */}
@@ -342,7 +464,7 @@ export default function App() {
                       </h2>
                     </div>
                     <p className="text-xs text-slate-500 mt-1">
-                      Tracking tickets submitted by {DEMO_USER.name} across Nagpur Municipal Corporation (NMC).
+                      Tracking tickets submitted by {auth.displayName || DEMO_USER.name} across Nagpur.
                     </p>
                   </div>
                   <Button
@@ -384,7 +506,7 @@ export default function App() {
                       </h2>
                     </div>
                     <p className="text-xs text-slate-500 mt-1">
-                      Civic issues located in adjacent Nagpur neighborhoods (Sitabuldi, Dharampeth, Civil Lines, Sadar, Wardha Road).
+                      Civic issues located in adjacent Nagpur neighborhoods.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -392,7 +514,7 @@ export default function App() {
                       variant="outline"
                       size="md"
                       icon={Map}
-                      onClick={() => setActiveTab('map')}
+                      onClick={() => handleSelectTab('map')}
                     >
                       Open in Map
                     </Button>
@@ -440,7 +562,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Report an Issue Modal with Nagpur Suggestions & Heuristic Duplicate Checking */}
+      {/* Modals */}
       <ReportIssueModal
         isOpen={isReportModalOpen}
         onClose={() => setIsReportModalOpen(false)}
@@ -449,7 +571,6 @@ export default function App() {
         existingComplaints={complaints}
       />
 
-      {/* Complaint Inspector Modal with Demo Status Controls */}
       <ComplaintDetailModal
         complaint={selectedComplaint}
         isOpen={Boolean(selectedComplaint)}

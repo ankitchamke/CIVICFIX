@@ -1,6 +1,6 @@
 // Complaints Repository
-// Handles persistent civic grievance storage with Supabase database integration
-// and automatic fallback to browser localStorage.
+// Handles persistent shared civic grievance storage with Supabase database integration,
+// Realtime cross-browser synchronization, and fail-safe local fallback.
 
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import {
@@ -21,6 +21,9 @@ export function mapRowToComplaint(row) {
     categoryLabel: row.category_label || row.category,
     location: row.location,
     ward: row.ward || 'Dharampeth Zone (Zone 2), Nagpur',
+    latitude: row.latitude != null ? Number(row.latitude) : null,
+    longitude: row.longitude != null ? Number(row.longitude) : null,
+    isVerifiedLocation: Boolean(row.is_verified_location),
     schematicX: row.schematic_x != null ? Number(row.schematic_x) : 440,
     schematicY: row.schematic_y != null ? Number(row.schematic_y) : 250,
     dateReported: row.date_reported || row.created_at,
@@ -35,6 +38,10 @@ export function mapRowToComplaint(row) {
     hasPhoto: Boolean(row.has_photo || row.photo_url),
     photoUrl: row.photo_url || null,
     timeline: Array.isArray(row.timeline) ? row.timeline : [],
+    reporterId: row.reporter_id || null,
+    reporterName: row.reporter_name || row.created_by || 'Resident Contributor',
+    reporterEmail: row.reporter_email || null,
+    isDemo: Boolean(row.is_demo),
   };
 }
 
@@ -49,8 +56,11 @@ export function mapComplaintToRow(c, authorName) {
     category_label: c.categoryLabel,
     location: c.location,
     ward: c.ward,
-    schematic_x: c.schematicX,
-    schematic_y: c.schematicY,
+    latitude: c.latitude != null ? Number(c.latitude) : null,
+    longitude: c.longitude != null ? Number(c.longitude) : null,
+    is_verified_location: Boolean(c.isVerifiedLocation),
+    schematic_x: c.schematicX || 440,
+    schematic_y: c.schematicY || 250,
     date_reported: c.dateReported,
     status: c.status,
     priority: c.priority,
@@ -61,6 +71,10 @@ export function mapComplaintToRow(c, authorName) {
     has_photo: Boolean(c.hasPhoto),
     photo_url: c.photoUrl,
     timeline: c.timeline || [],
+    reporter_id: c.reporterId || 'demo_user',
+    reporter_name: c.reporterName || authorName || 'Ankit Chamke (Demo)',
+    reporter_email: c.reporterEmail || null,
+    is_demo: Boolean(c.isDemo),
     created_by: authorName || 'Ankit Chamke (Demo)',
   };
 }
@@ -69,7 +83,6 @@ export function mapComplaintToRow(c, authorName) {
  * Loads complaints from Supabase or falls back to localStorage.
  */
 export async function getComplaints() {
-  // Always load cached data first for instant render
   const localData = loadStoredComplaints();
 
   if (!isSupabaseConfigured() || !supabase) {
@@ -107,7 +120,7 @@ export async function getComplaints() {
       };
     }
 
-    // Remote table exists but is empty: return seed data
+    // Remote table exists but is empty
     return {
       complaints: localData,
       source: 'supabase_empty',
@@ -125,26 +138,28 @@ export async function getComplaints() {
 }
 
 /**
- * Saves a new complaint to state, localStorage, and Supabase.
+ * Saves a new complaint.
+ * Genuinely verifies write to Supabase if configured.
+ * Throws an error on failure so the caller preserves form inputs!
  */
 export async function addComplaint(newComplaint, authorName = 'Ankit Chamke') {
-  // 1. Immediately persist locally
+  const isConfigured = isSupabaseConfigured() && Boolean(supabase);
+
+  // If Supabase is configured, attempt real remote write first
+  if (isConfigured) {
+    const row = mapComplaintToRow(newComplaint, authorName);
+    const { error } = await supabase.from('complaints').insert([row]);
+
+    if (error) {
+      // Honest failure: do NOT fake success! Throw error to preserve user's form inputs.
+      throw new Error(`Database save error: ${error.message}`);
+    }
+  }
+
+  // Persist locally as cache
   const current = loadStoredComplaints();
   const updated = [newComplaint, ...current.filter((c) => c.id !== newComplaint.id)];
   saveComplaintsToStorage(updated);
-
-  // 2. Synchronize to Supabase if available
-  if (isSupabaseConfigured() && supabase) {
-    try {
-      const row = mapComplaintToRow(newComplaint, authorName);
-      const { error } = await supabase.from('complaints').insert([row]);
-      if (error) {
-        console.warn('Supabase insert note (persisted locally):', error.message);
-      }
-    } catch (err) {
-      console.warn('Supabase insert error (persisted locally):', err);
-    }
-  }
 
   return updated;
 }
@@ -153,7 +168,7 @@ export async function addComplaint(newComplaint, authorName = 'Ankit Chamke') {
  * Updates a complaint's status with timeline logging.
  */
 export async function updateComplaintStatus(complaintId, newStatus, timelineEntry) {
-  // 1. Update locally
+  // Update locally first
   const current = loadStoredComplaints();
   const updated = current.map((item) => {
     if (item.id === complaintId) {
@@ -168,7 +183,7 @@ export async function updateComplaintStatus(complaintId, newStatus, timelineEntr
   });
   saveComplaintsToStorage(updated);
 
-  // 2. Sync to Supabase
+  // Sync to Supabase
   if (isSupabaseConfigured() && supabase) {
     try {
       const target = updated.find((c) => c.id === complaintId);
@@ -193,7 +208,6 @@ export async function updateComplaintStatus(complaintId, newStatus, timelineEntr
  * Updates complaint upvote count in storage and Supabase.
  */
 export async function incrementComplaintUpvotes(complaintId, newCount) {
-  // 1. Update locally
   const current = loadStoredComplaints();
   const updated = current.map((item) => {
     if (item.id === complaintId) {
@@ -203,7 +217,6 @@ export async function incrementComplaintUpvotes(complaintId, newCount) {
   });
   saveComplaintsToStorage(updated);
 
-  // 2. Sync to Supabase
   if (isSupabaseConfigured() && supabase) {
     try {
       await supabase
@@ -216,6 +229,35 @@ export async function incrementComplaintUpvotes(complaintId, newCount) {
   }
 
   return updated;
+}
+
+/**
+ * Subscribes to Supabase Realtime changes across all connected browser sessions.
+ */
+export function subscribeToComplaints(onPayloadChange) {
+  if (!isSupabaseConfigured() || !supabase) {
+    return () => {};
+  }
+
+  try {
+    const channel = supabase
+      .channel('civicfix-complaints-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'complaints' },
+        (payload) => {
+          onPayloadChange(payload);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  } catch (err) {
+    console.warn('Could not establish Supabase realtime channel:', err);
+    return () => {};
+  }
 }
 
 /**

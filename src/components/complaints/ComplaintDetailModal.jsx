@@ -127,10 +127,19 @@ export function ComplaintDetailModal({
                   <div>
                     <p className="font-semibold">{complaint.location}</p>
                     <p className="text-slate-500 text-[11px] mt-0.5">{complaint.ward}</p>
-                    {complaint.schematicX !== undefined && (
-                      <p className="text-slate-400 font-mono text-[10px] mt-0.5">
-                        Nagpur Schematic Map Node: ({complaint.schematicX}, {complaint.schematicY}) · Illustrative Diagram Position
+                    {complaint.latitude != null && complaint.longitude != null ? (
+                      <p className="text-emerald-700 font-mono text-[10px] mt-0.5 flex items-center gap-1">
+                        <span>✓ GPS Coordinates: {Number(complaint.latitude).toFixed(4)}°N, {Number(complaint.longitude).toFixed(4)}°E</span>
                       </p>
+                    ) : (
+                      <p className="text-amber-700 font-mono text-[10px] mt-0.5">
+                        Address-only report (GPS pin unverified)
+                      </p>
+                    )}
+                    {complaint.isDemo && (
+                      <span className="inline-block mt-1 text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                        Demo Baseline Record
+                      </span>
                     )}
                   </div>
                 </div>
